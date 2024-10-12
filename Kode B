@@ -1,0 +1,166 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+#include <MQUnifiedsensor.h>
+#include "GP2YDustSensor.h"
+
+// Definisi untuk ESP32 dan ESP8266
+#define placa "ESP32/ESP8266"
+
+// Tentukan pin untuk LED dan pin analog
+const uint8_t ledOutputPin = 4;  // Ganti dengan pin yang sesuai untuk ESP32 atau ESP8266
+const uint8_t analogReadPin = A0; // A0 untuk ESP8266, bisa pin 34, 35, dll. untuk ESP32
+
+// Buat objek sensor debu
+GP2YDustSensor dustSensor(GP2Y1010AU0F, ledOutputPin, analogReadPin, 20); // 20 adalah jumlah sampel untuk rata-rata
+
+// Definisi untuk sensor MQ7
+#define pinMQ7 A0 // Pin analog untuk MQ7 (A0 untuk ESP8266, bisa A34, A35, dll. untuk ESP32)
+#define typeMQ7 "MQ-7" 
+#define RatioMQ7CleanAir 27.5 // RS / R0 untuk MQ7
+
+// Definisi untuk sensor MQ135
+#define typeMQ135 "MQ-135" // MQ135
+#define RatioMQ135CleanAir 3.6 // RS / R0 untuk MQ135  
+float factorEscala = 0.1875F; // Sesuaikan dengan ADS
+
+// Declare Sensors
+MQUnifiedsensor MQ7(placa, typeMQ7, RatioMQ7CleanAir, pinMQ7);
+MQUnifiedsensor MQ135(placa, typeMQ135, RatioMQ135CleanAir);
+
+// Buat objek ADS1115
+Adafruit_ADS1115 ads;
+
+unsigned long previousMillis = 0;
+const long interval = 2000; // Waktu antara pembacaan
+
+void setup() {
+    Serial.begin(115200); // Inisialisasi Serial Monitor
+    delay(200);
+    
+    // Inisialisasi sensor debu
+    dustSensor.begin();
+
+    // Inisialisasi MQ7
+    MQ7.setRegressionMethod(1); // _PPM = a * ratio^b
+    MQ7.init(); 
+
+    // Inisialisasi MQ135
+    MQ135.setRegressionMethod(1); // _PPM = a * ratio^b
+    MQ135.init(); 
+    
+    // Inisialisasi ADS1115
+    ads.begin(); 
+
+    // Kalibrasi MQ7
+    calibrateMQ7();
+
+    // Kalibrasi MQ135
+    calibrateMQ135();
+}
+
+void loop() {
+    unsigned long currentMillis = millis();
+    if (currentMillis - previousMillis >= interval) {
+        previousMillis = currentMillis;
+
+        // Pembacaan sensor debu
+        uint16_t dustDensity = dustSensor.getDustDensity(20); // Ambil 20 pembacaan untuk rata-rata
+        Serial.print("Kepadatan Debu: ");
+        Serial.print(dustDensity);
+        Serial.println(" µg/m³");
+
+        // Update dan baca data dari MQ7
+        float coPPM = readMQ7();
+
+        // Update dan baca data dari MQ135
+        readMQ135();
+    }
+}
+
+void calibrateMQ7() {
+    Serial.print("Calibrating MQ7, please wait.");
+    float calcR0 = 0;
+    for (int i = 1; i <= 10; i++) {
+        MQ7.update(); // Update data
+        calcR0 += MQ7.calibrate(RatioMQ7CleanAir);
+        Serial.print(".");
+    }
+    MQ7.setR0(calcR0 / 10);
+    Serial.println("  done!");
+
+    if (isinf(calcR0)) {
+        Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected)");
+        while (1);
+    }
+    if (calcR0 == 0) {
+        Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground)");
+        while (1);
+    }
+}
+
+void calibrateMQ135() {
+    Serial.print("Calibrating MQ135, please wait.");
+    float calcR0 = 0;
+    for (int i = 1; i <= 10; i++) {
+        short adc0 = ads.readADC_SingleEnded(0);
+        float voltios = (adc0 * factorEscala) / 1000.0; // Menghitung tegangan
+        MQ135.externalADCUpdate(voltios); // Update data
+        calcR0 += MQ135.calibrate(RatioMQ135CleanAir);
+        Serial.print(".");
+    }
+    MQ135.setR0(calcR0 / 10);
+    Serial.println("  done!");
+
+    if (isinf(calcR0)) {
+        Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected)");
+        while (1);
+    }
+    if (calcR0 == 0) {
+        Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground)");
+        while (1);
+    }
+}
+
+float readMQ7() {
+    MQ7.update(); // Update data
+    MQ7.readSensor(); // Sensor will read PPM concentration
+    float coPPM = MQ7.getPPM();
+    Serial.print("CO Concentration: ");
+    Serial.print(coPPM);
+    Serial.println(" PPM");
+    return coPPM;
+}
+
+void readMQ135() {
+    short adc0 = ads.readADC_SingleEnded(0);
+    float voltios = (adc0 * factorEscala) / 1000.0; // Menghitung tegangan
+    MQ135.externalADCUpdate(voltios); // Update data
+
+    // Menghitung konsentrasi masing-masing gas
+    MQ135.setA(605.18); MQ135.setB(-3.937); 
+    float CO = MQ135.readSensor(); 
+
+    MQ135.setA(77.255); MQ135.setB(-3.18); 
+    float Alcohol = MQ135.readSensor(); 
+
+    MQ135.setA(110.47); MQ135.setB(-2.862); 
+    float CO2 = MQ135.readSensor(); 
+
+    MQ135.setA(44.947); MQ135.setB(-3.445); 
+    float Toluen = MQ135.readSensor(); 
+
+    MQ135.setA(102.2); MQ135.setB(-2.473); 
+    float NH4 = MQ135.readSensor(); 
+
+    MQ135.setA(34.668); MQ135.setB(-3.369); 
+    float Aceton = MQ135.readSensor(); 
+
+    Serial.print("|   "); Serial.print(CO); 
+    Serial.print("   |   "); Serial.print(Alcohol);
+    Serial.print("   |   "); Serial.print(CO2 + 400); // Offset CO2
+    Serial.print("   |   "); Serial.print(Toluen); 
+    Serial.print("   |   "); Serial.print(NH4); 
+    Serial.print("   |   "); Serial.print(Aceton);
+    Serial.println("   |"); 
+}
